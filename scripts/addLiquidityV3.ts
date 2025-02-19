@@ -1,115 +1,94 @@
-import { ethers, network } from "hardhat";
-const { impersonateAccount } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
-
-// Uniswap V3 Contract Addresses
-const POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"; // Nonfungible Position Manager
-
-// Tokens (Threshold and KuCoin)
-const THRESHOLD_ADDRESS = "0xCdF7028ceAB81fA0C6971208e83fa7872994beE5";
-const KUCOIN_ADDRESS = "0xf34960d9d60be18cC1D5Afc1A6F012A723a28811";
-
-// Liquidity Provider (Has both tokens)
-const LIQUIDITY_PROVIDER = "0xf584F8728B874a6a5c7A8d4d387C9aae9172D621";
+import { ethers } from "hardhat";
+const helpers = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 const main = async () => {
+    // Token and Contract Addresses
+    const USDCAddress = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const DAIAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
+    const UNI_NPM = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+    const whaleAddress = "0xf584f8728b874a6a5c7a8d4d387c9aae9172d621";
+
+    // Impersonate whale account
+    await helpers.impersonateAccount(whaleAddress);
+    const whale = await ethers.getSigner(whaleAddress);
+
+    // Get contract instances
+    const usdc = await ethers.getContractAt('IERC20', USDCAddress);
+    const dai = await ethers.getContractAt('IERC20', DAIAddress);
+    const positionManager = await ethers.getContractAt('INonfungiblePositionManager', UNI_NPM);
+
+    // Gas settings
+    const gasOptions = {
+        maxFeePerGas: ethers.parseUnits("150", "gwei"),
+        maxPriorityFeePerGas: ethers.parseUnits("1.5", "gwei")
+    };
+
+    // Token amounts
+    const usdcAmount = ethers.parseUnits("100000", 6);
+    const daiAmount = ethers.parseUnits("100000", 18);
+
+    // Check initial balances
+    console.log("\n=== Initial Balances ===");
+    console.log("USDC:", ethers.formatUnits(await usdc.balanceOf(whale.address), 6));
+    console.log("DAI:", ethers.formatUnits(await dai.balanceOf(whale.address), 18));
+
+    // Sort tokens by address (Uniswap requirement)
+    let token0, token1, amount0Desired, amount1Desired;
+    if (USDCAddress.toLowerCase() < DAIAddress.toLowerCase()) {
+        token0 = USDCAddress;
+        token1 = DAIAddress;
+        amount0Desired = usdcAmount;
+        amount1Desired = daiAmount;
+    } else {
+        token0 = DAIAddress;
+        token1 = USDCAddress;
+        amount0Desired = daiAmount;
+        amount1Desired = usdcAmount;
+    }
+
+    // Approve token spending
+    console.log("\nApproving tokens...");
+    await usdc.connect(whale).approve(UNI_NPM, usdcAmount, gasOptions);
+    await dai.connect(whale).approve(UNI_NPM, daiAmount, gasOptions);
+
+    // Use a wider tick range for better success chances
+    // For USDC/DAI which are stablecoins, price shouldn't vary much
+    // But we'll use a safe range: +/- 10% from the current price
+    const tickLower = -887220;  // A much wider range
+    const tickUpper = 887220;   // Allowing for significant price movements
+
+    // Set up liquidity position parameters
+    const mintParams = {
+        token0: token0,
+        token1: token1,
+        fee: 3000, // 0.3% fee tier
+        tickLower: tickLower,
+        tickUpper: tickUpper,
+        amount0Desired: amount0Desired,
+        amount1Desired: amount1Desired,
+        amount0Min: 0,
+        amount1Min: 0,
+        recipient: whale.address,
+        deadline: Math.floor(Date.now() / 1000) + 300 // 5 minutes
+    };
+
+    // Add liquidity
+    console.log("\nAdding liquidity...");
+    console.log("Mint params:", mintParams);
     
+    const tx = await positionManager.connect(whale).mint(mintParams, gasOptions);
+    console.log("Transaction hash:", tx.hash);
+    await tx.wait();
 
-    console.log("\n--- Impersonating Liquidity Provider ---");
-    await impersonateAccount(LIQUIDITY_PROVIDER);
-    const signer = await ethers.getSigner(LIQUIDITY_PROVIDER);
+    // Check final balances
+    console.log("\n=== Final Balances ===");
+    console.log("USDC:", ethers.formatUnits(await usdc.balanceOf(whale.address), 6));
+    console.log("DAI:", ethers.formatUnits(await dai.balanceOf(whale.address), 18));
 
-    // Get Contract Instances
-    console.log("\n--- Fetching Contract Instances ---");
-    const thresholdContract = await ethers.getContractAt("IERC20", THRESHOLD_ADDRESS, signer);
-    const kucoinContract = await ethers.getContractAt("IERC20", KUCOIN_ADDRESS, signer);
-    const positionManager = await ethers.getContractAt("INonfungiblePositionManager", POSITION_MANAGER, signer);
-
-    // Fetch Balances Before Adding Liquidity
-    const thresholdBalance = await thresholdContract.balanceOf(LIQUIDITY_PROVIDER);
-    const kucoinBalance = await kucoinContract.balanceOf(LIQUIDITY_PROVIDER);
-
-    console.log("\n--- Balances Before Liquidity Provision ---");
-    console.log(`Threshold Token Balance: ${ethers.formatUnits(thresholdBalance, 18)}`);
-    console.log(`KuCoin Token Balance: ${ethers.formatUnits(kucoinBalance, 6)}`);
-
-    // Ensure the provider has enough balance
-    const amountThreshold = ethers.parseUnits("50106000", 18);
-    const amountKucoin = ethers.parseUnits("8000", 6);
-
-    if (thresholdBalance < amountThreshold || kucoinBalance < amountKucoin) {
-        console.error("Insufficient token balance for liquidity provision.");
-        return;
-    }
-
-    // Approve Tokens for the Position Manager
-    console.log("\n--- Approving Tokens ---");
-    await (await thresholdContract.approve(POSITION_MANAGER, amountThreshold)).wait();
-    await (await kucoinContract.approve(POSITION_MANAGER, amountKucoin)).wait();
-    console.log("Tokens approved successfully.");
-
-    // Define Liquidity Parameters
-    const tickLower = -587220; 
-    const tickUpper = 587220; 
-    const fee = 4000; 
-
-    // Estimate Gas
-    console.log("\n--- Estimating Gas for Minting Liquidity Position ---");
-    try {
-        const gasEstimate = await positionManager.mint({
-            token0: THRESHOLD_ADDRESS,
-            token1: KUCOIN_ADDRESS,
-            fee,
-            tickLower,
-            tickUpper,
-            amount0Desired: amountThreshold,
-            amount1Desired: amountKucoin,
-            amount0Min: amountThreshold * 95n/100n, // 5% Slippage
-            amount1Min: amountKucoin * 95n/100n,
-            recipient: LIQUIDITY_PROVIDER,
-            deadline: Math.floor(Date.now() / 1000) + 600
-        });
-
-        console.log(`Estimated Gas: ${gasEstimate.toString()}`);
-    } catch (error) {
-        console.error("Gas estimation failed:", error);
-        return;
-    }
-
-    // Add Liquidity
-    console.log("\n--- Adding Liquidity to Uniswap V3 ---");
-    try {
-        const tx = await positionManager.mint({
-            token0: THRESHOLD_ADDRESS,
-            token1: KUCOIN_ADDRESS,
-            fee,
-            tickLower,
-            tickUpper,
-            amount0Desired: amountThreshold,
-            amount1Desired: amountKucoin,
-            amount0Min: amountThreshold * 95n/100n, // 5% Slippage
-            amount1Min: amountKucoin * 95n/100n,
-            recipient: LIQUIDITY_PROVIDER,
-            deadline: Math.floor(Date.now() / 1000) + 600
-        });
-
-        console.log("Transaction sent. Waiting for confirmation...");
-        await tx.wait();
-        console.log(`Liquidity added successfully. Tx Hash: ${tx.hash}`);
-    } catch (error) {
-        console.error("Transaction failed:", error);
-        return;
-    }
-
-    // Fetch Balances After Adding Liquidity
-    const thresholdBalanceAfter = await thresholdContract.balanceOf(LIQUIDITY_PROVIDER);
-    const kucoinBalanceAfter = await kucoinContract.balanceOf(LIQUIDITY_PROVIDER);
-
-    console.log("\n--- Balances After Liquidity Provision ---");
-    console.log(`Threshold Token Balance: ${ethers.formatUnits(thresholdBalanceAfter, 18)}`);
-    console.log(`KuCoin Token Balance: ${ethers.formatUnits(kucoinBalanceAfter, 6)}`);
+    console.log("\n✅ Liquidity added successfully!");
 };
 
 main().catch((error) => {
-    console.error("Script execution failed:", error);
+    console.error("\n❌ Error:", error);
     process.exit(1);
 });
